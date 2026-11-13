@@ -8,7 +8,7 @@ How a change gets from a merged PR to all users with `livesvc`'s pieces, and whe
 2. Build one image, tagged with the commit SHA. The same image goes to every environment; only env vars differ.
 3. Deploy to staging. Smoke test `/readyz` and one real request.
 4. Canary in prod: one replica of the new image and one fresh replica of the current image, each taking an equal small slice of traffic.
-5. Soak for long enough to get a few hundred real requests on each. `livesvc-canary baseline_url canary_url` compares error rate and p95.
+5. Soak for long enough to get a few hundred real requests on each. `livesvc-canary baseline_url canary_url` compares error rate and p95. Point it at the admin listener (`ADMIN_PORT`, default 9090), where `/metrics` lives.
 6. Promote in steps (5%, 25%, 100%) with a soak and a comparison between steps, or roll back.
 
 `deploy/github-actions-deploy.yml` sketches steps 2 to 6. The platform-specific commands are left as placeholders because they are the part every team does differently.

@@ -41,12 +41,15 @@ Prefer tools they already pay for. For each loop, name the smallest change and t
 | Big-bang releases | Canary next to a fresh baseline, compare, then step up | `canary.py`, `docs/rollout.md` |
 | Prod data in staging | Delete it; synthetic or masked data; environment stamp on databases | `data.py` |
 | Code reads any field for any reason | Purpose-based access with consent checks and an audit row per read | `data.py` |
+| Client chooses its own purpose or identity | Role from a verified token decides purpose and fields; reject client-supplied ones | `auth.py`, `app.py` |
+| Metrics and admin reachable from the internet | Separate admin listener on an internal address | `server.py`, `app.py` |
 
 ## 3. Rules
 
 - Never recommend copying production data to laptops, shared dev databases or prompts. If realistic data is needed off-prod, use synthetic or masked data under a written rule.
 - Live credentials for bureaus, processors, email or SMS do not belong in dev. Each integration needs a sandbox mode and an obvious live mode.
 - Every flag has an owner and a removal date.
+- The server decides who is asking and for what. A purpose, role or actor taken from the request is a suggestion, not a control.
 - Database changes are backward compatible with the previous release, so an image rollback is a real rollback.
 - Consent requirements are a legal question. Build the mechanism; let counsel set the rules.
 
