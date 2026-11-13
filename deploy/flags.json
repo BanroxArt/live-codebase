@@ -1,0 +1,11 @@
+{
+  "new_recs": {
+    "owner": "growth",
+    "remove_by": "2026-12-31",
+    "default": false,
+    "rollout": {"dev": 100, "test": 50, "staging": 100, "prod": 5},
+    "allow": [],
+    "deny": [],
+    "killed": false
+  }
+}
