@@ -1,71 +1,70 @@
 ---
 name: live-codebase
-description: Help a team make a software product “live” rather than static — observability, feature flags, continuous deploy, and safe use of live data. Use when the user says the codebase is a snapshot, releases are rare or manual, they cannot tell what production is doing, they want flags or gradual rollouts, or they want to connect the product to real (permissioned) data instead of fixtures only. Do not use this to exfiltrate production data or to skip consent and privacy rules.
+description: Help a team make one software service "live" rather than static, meaning it can be shipped and rolled back on a known path, observed in production, steered with feature flags and kill switches, and connected to real permissioned data safely. Use when the user says the codebase is a snapshot, releases are rare or manual, they cannot tell what production is doing, they want flags, gradual rollouts or canaries, or they want to move off fixtures onto real data. Uses the livesvc reference service in this repo as the definition of done. Do not use this to copy production data off-platform or to skip consent and privacy rules.
 ---
 
-# Make the codebase live, not static
+# Make one service live
 
-A static codebase is a repo that can be built, maybe demoed, and then goes quiet. A live codebase is one the team can ship, observe, and change safely while real users are on it.
+A static codebase builds, maybe demos, then goes quiet. A live one can be changed safely while real users are on it. The test is four loops:
 
-## What “live” means here
+1. Ship: a merged change reaches production on a known path, and can be rolled back in minutes.
+2. See: logs, metrics and traces tell you what it is doing and whether it is broken, and a named person is paged when it is.
+3. Steer: behaviour can be changed without a deploy, and a bad feature can be turned off in seconds.
+4. Real data: production uses current, permissioned data; other environments do not hold copies of it.
 
-Four loops, all of them required before you call the system live:
+This repo's `livesvc` package implements each loop in a few hundred lines. Use it as the reference for what good looks like, not as something the team must adopt.
 
-1. **Ship** — a change can go from a pull request to production on a known path, with a way to roll back.
-2. **See** — the team can tell, from logs, metrics, and traces, what the app is doing and whether it is broken.
-3. **Steer** — behavior can be changed with feature flags or config, not only with a new deploy, and a bad flag can be turned off quickly.
-4. **Learn from real data** — the product can use current, permissioned user or market data in production and, where justified, in carefully isolated non-prod environments. Fixtures alone are not “live.”
+## 1. Read the repo before suggesting anything
 
-## How to work
+Boot it from its own README. Note what fails. Then record, from the tree and from asking:
 
-1. Start with a current-state read of the unfamiliar repo, then ask what they have today: language, host, CI, how they deploy, how they know production is down, whether flags exist, and where production data lives. Do not invent architecture that is not in the tree.
-2. Pick the thinnest path that gets all four loops working. Prefer boring tools they already pay for.
-3. Do not recommend copying production data to laptops or into prompts. If they need realistic data off-prod, prefer masked or synthetic data and a written rule.
-4. Give a two-week plan and a 90-day plan. The two-week plan should end with one service that is continuously deployable, observable, and flagged.
+- Language, framework, how it is hosted, how deploys happen today, who can deploy
+- CI: what runs, on which branches, how long it takes
+- Logs: format, where they go, whether a request can be followed end to end
+- Health endpoints, uptime checks, who gets paged
+- Flags or config switches, if any
+- Where production data lives, and whether any non-prod environment has a copy
+- Third-party integrations and which credentials point at live accounts
 
-## Two-week path (one service)
+Do not invent architecture that is not in the tree. If something cannot be determined, list it as unknown.
 
-### Ship
+## 2. Pick the thinnest path through all four loops
 
-- One CI pipeline that runs tests on every change to the default branch.
-- A documented deploy (managed platform, container service, or equivalent) that is triggered from that branch or from a tagged release.
-- A rollback: previous image or a revert plus redeploy, practiced once.
-- Database changes are backward-compatible or gated; do not require heroics at 11pm as the default path.
+Prefer tools they already pay for. For each loop, name the smallest change and the file it lands in. Typical first moves, with the livesvc file that shows the pattern:
 
-### See
+| Gap | First move | Reference |
+| --- | --- | --- |
+| No request correlation | Request id middleware, JSON logs with request and trace ids | `app.py`, `logs.py` |
+| Cannot see errors or latency | Per-route request counter and latency histogram on route templates | `metrics.py` |
+| Deploys drop requests | Separate liveness and readiness; drain on SIGTERM | `health.py`, `server.py` |
+| No way to turn things off | Server-side flags with deterministic bucketing and a file-based kill switch | `flags.py` |
+| Big-bang releases | Canary next to a fresh baseline, compare, then step up | `canary.py`, `docs/rollout.md` |
+| Prod data in staging | Delete it; synthetic or masked data; environment stamp on databases | `data.py` |
+| Code reads any field for any reason | Purpose-based access with consent checks and an audit row per read | `data.py` |
 
-- Structured logs with a request or trace id.
-- Three golden signals to start: error rate, latency, and traffic. Add saturation when relevant.
-- A health endpoint and an uptime check that pages a real person, not a Slack channel no one owns.
-- For user-facing money or identity actions, log the action and the outcome without logging secrets or full account numbers.
+## 3. Rules
 
-### Steer
+- Never recommend copying production data to laptops, shared dev databases or prompts. If realistic data is needed off-prod, use synthetic or masked data under a written rule.
+- Live credentials for bureaus, processors, email or SMS do not belong in dev. Each integration needs a sandbox mode and an obvious live mode.
+- Every flag has an owner and a removal date.
+- Database changes are backward compatible with the previous release, so an image rollback is a real rollback.
+- Consent requirements are a legal question. Build the mechanism; let counsel set the rules.
 
-- One feature-flag system (even a simple server-side flag table) with a default of “off.”
-- Every new risky feature ships behind a flag.
-- A named owner who can turn a flag off without a deploy.
-- Flags are temporary. Each flag has a removal condition.
+## 4. Two-week plan for one service
 
-### Live data
+Week 1: boot and map the repo, CI on every change, request ids and JSON logs, golden-signal metrics, liveness and readiness, remove production data from non-prod and rotate any live key that sat on a laptop.
 
-- Production uses real, permissioned data only.
-- Non-prod uses synthetic or masked data unless there is a written exception.
-- If the product depends on third-party APIs (identity, credit, payments, email, SMS), those integrations have a staging mode and a clear “this is live” mode. Never point a shared dev environment at a production bureau, processor, or messaging account by accident.
-- Retention and deletion are documented for personal data.
+Week 2: one documented deploy path from `main` with a practiced rollback, server-side flags with a kill switch the on-call person can use without a deploy, a first canary or at least a staged rollout, and three alerts that page a named person.
 
-## 90-day extensions
-
-- Tracing across services.
-- Error budgets or at least a weekly reliability review.
-- Preview environments for pull requests, if cost allows.
-- A release changelog users or support can read.
-- Load or soak testing on the paths that move money or identity.
-- Data quality checks on the live feeds the product depends on (not just “the cron ran”).
+Then a 90-day list: tracing across services, an error budget or weekly reliability review, preview environments if cost allows, a changelog support can read, load tests on paths that move money or identity, data-quality checks on live feeds.
 
 ## Output format
 
-1. Current-state snapshot (what is static vs already live)
+1. Current-state snapshot: what is already live, what is static, what is unknown
 2. Gaps against the four loops
-3. Two-week plan with owners and tools
-4. Risks (especially around production data and third-party live credentials)
-5. A short “definition of done” the team can reuse
+3. Two-week plan, day by day, with owners and the tool or file for each item
+4. Risks, especially production data in the wrong place and live third-party credentials
+5. Definition of done the team can reuse for the next service
+6. 90-day list
+
+See `examples/two-week-plan.md` for the shape.

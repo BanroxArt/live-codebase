@@ -6,10 +6,10 @@ This sample shows the skill's report shape. It is not a description of Banrox's 
 
 Product: a two-person SaaS web app (one API, one web client, one Postgres database) hosted on a single cloud VM. Deploys are a manual `git pull` and process restart. The team can build and demo locally. Releases happen when someone has time, usually every few weeks.
 
-- **Ship:** no CI on the default branch. No documented rollback. Schema changes are applied by hand.
-- **See:** application logs go to a file on the VM. No request IDs, no uptime check, no owner for alerts.
-- **Steer:** no feature flags. Every change is on or off with the next deploy.
-- **Live data:** production uses real customer records. A shared staging database was copied from production six months ago and still contains personal data. Third-party email is pointed at the live vendor account from the developers' laptops.
+- Ship: no CI on the default branch. No documented rollback. Schema changes are applied by hand.
+- See: application logs go to a file on the VM. No request IDs, no uptime check, no owner for alerts.
+- Steer: no feature flags. Every change is on or off with the next deploy.
+- Live data: production uses real customer records. A shared staging database was copied from production six months ago and still contains personal data. Third-party email is pointed at the live vendor account from the developers' laptops.
 
 ## 2. Gaps against the four loops
 
@@ -22,7 +22,7 @@ Product: a two-person SaaS web app (one API, one web client, one Postgres databa
 
 Owners below are fictional. Tools are boring defaults the team already has or can add without a new platform project.
 
-### Week 1 — read the repo and close the worst data risk
+### Week 1: read the repo and close the worst data risk
 
 - Day 1: Boot the repo locally from the README and note anything that does not run. Map services, data stores, and outbound vendors.
 - Day 2: Stand up CI that runs the existing tests on every change to the default branch.
@@ -30,7 +30,7 @@ Owners below are fictional. Tools are boring defaults the team already has or ca
 - Day 4: Add structured logs with a request ID, plus error rate, latency, and traffic on the API.
 - Day 5: Document the current deploy and a rollback (redeploy the previous build). Practice the rollback once on staging.
 
-### Week 2 — make one service live
+### Week 2: make one service live
 
 - Days 6–7: Trigger deploys from the default branch or a tagged release, for the API only.
 - Day 8: Add a health endpoint and an uptime check that pages a named person.
