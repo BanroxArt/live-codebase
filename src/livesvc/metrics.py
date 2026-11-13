@@ -10,6 +10,7 @@ from __future__ import annotations
 import bisect
 import threading
 from collections import defaultdict
+from typing import Any
 
 DEFAULT_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0)
 
@@ -24,11 +25,15 @@ def _labels(labels: dict[str, str]) -> str:
     return "{" + body + "}"
 
 
+LabelKey = tuple[tuple[str, str], ...]
+
+
 class Registry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._counters: dict[str, dict[tuple, float]] = defaultdict(lambda: defaultdict(float))
-        self._hists: dict[str, dict[tuple, list]] = defaultdict(dict)
+        self._counters: dict[str, dict[LabelKey, float]] = defaultdict(lambda: defaultdict(float))
+        # Per label set: [bucket counts, sum, count].
+        self._hists: dict[str, dict[LabelKey, list[Any]]] = defaultdict(dict)
         self._help: dict[str, tuple[str, str]] = {}
         self._buckets: dict[str, tuple[float, ...]] = {}
 

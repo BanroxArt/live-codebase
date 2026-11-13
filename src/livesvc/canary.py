@@ -74,7 +74,8 @@ def stats_from_metrics(
     req = err = 0.0
     buckets: dict[float, float] = {}
     for name, labels, value in samples:
-        if labels.get("route") in skip_routes:
+        if labels.get("route") in skip_routes or labels.get("listener") == "admin":
+            # Probes and scrapes are not user traffic.
             continue
         if name == "http_requests_total":
             req += value
@@ -131,7 +132,8 @@ def decide(baseline: Stats, canary: Stats, t: Thresholds | None = None) -> Verdi
 
 def _fetch(url: str) -> str:
     with urllib.request.urlopen(url, timeout=10) as resp:
-        return resp.read().decode()
+        body: bytes = resp.read()
+        return body.decode()
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -4,6 +4,13 @@ Plain WSGI on purpose: no framework to learn, nothing hidden, and every
 middleware concern (request ids, tracing, metrics, access logs, error
 handling) is in ``__call__`` where you can read it top to bottom. Swapping in
 FastAPI or Flask later changes the routing, not the ideas.
+
+There are two route tables. The public one (``App`` itself as a WSGI
+callable) serves the API plus liveness and readiness. The admin one
+(``App.admin``) serves metrics, version and the flag controls, and is meant to
+listen on a separate address that only the cluster can reach. Splitting by
+listener rather than by path means a proxy misconfiguration cannot expose
+``/metrics`` or ``/admin`` on the public port: those paths are 404 there.
 """
 
 from __future__ import annotations
@@ -19,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from livesvc import logs
+from livesvc.auth import AuthError, authenticate
 from livesvc.config import Settings
 from livesvc.data import PurposeError, Store
 from livesvc.flags import Flags
@@ -27,6 +35,7 @@ from livesvc.metrics import Registry
 from livesvc.tracing import Tracer, make_tracer, parse_traceparent
 
 log = logging.getLogger("livesvc.http")
+KNOWN_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
 REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
 STATUS_TEXT = {
     200: "OK",
@@ -63,12 +72,33 @@ class Response:
 
 
 Handler = Callable[[Request], Response]
+Route = tuple[str, re.Pattern[str], str, Handler]
+StartResponse = Callable[[str, list[tuple[str, str]]], Any]
 
 
 def _query(qs: str) -> dict[str, str]:
     from urllib.parse import parse_qsl
 
     return dict(parse_qsl(qs, keep_blank_values=True))
+
+
+def _match(
+    routes: list[Route], method: str, path: str
+) -> tuple[str, Handler | None, dict[str, str]]:
+    """Return (route label, handler, path params).
+
+    The label is always a route template or ``unmatched``, never the raw path,
+    so metrics stay bounded no matter what paths clients send. A 405 carries
+    the template of the route whose path matched.
+    """
+    path_template: str | None = None
+    for m, pattern, template, handler in routes:
+        match = pattern.match(path)
+        if match:
+            if m == method:
+                return template, handler, match.groupdict()
+            path_template = path_template or template
+    return (path_template or "unmatched"), None, {}
 
 
 def _headers(environ: dict[str, Any]) -> dict[str, str]:
@@ -94,7 +124,9 @@ class App:
         self.settings = settings
         self.store = store
         self.flags = flags
-        self.tracer = tracer or make_tracer(settings.trace_sample_rate)
+        self.tracer = tracer or make_tracer(
+            settings.trace_sample_rate, trust_parent=settings.trace_trust_parent
+        )
         self.metrics = metrics or Registry()
         self.health = health or Health()
         self.metrics.counter("http_requests_total", "Requests by route, method and status.")
@@ -102,37 +134,43 @@ class App:
         self.metrics.counter("flag_evaluations_total", "Flag evaluations by flag and result.")
         self.health.register("database", store.ping)
         self.health.register("flags", self._flags_loaded)
-        self._routes: list[tuple[str, re.Pattern[str], str, Handler]] = []
-        self.route("GET", "/healthz", self.healthz)
-        self.route("GET", "/readyz", self.readyz)
-        self.route("GET", "/metrics", self.metrics_page)
-        self.route("GET", "/version", self.version)
+        self._routes: list[Route] = []
+        self._admin_routes: list[Route] = []
+        for admin in (False, True):
+            self.route("GET", "/healthz", self.healthz, admin=admin)
+            self.route("GET", "/readyz", self.readyz, admin=admin)
         self.route("GET", "/api/users/{user_id}/profile", self.profile)
         self.route("GET", "/api/recommendations", self.recommendations)
-        self.route("GET", "/admin/flags", self.admin_flags)
-        self.route("POST", "/admin/flags/{name}/kill", self.admin_kill)
-        self.route("POST", "/admin/flags/{name}/revive", self.admin_revive)
+        self.route("GET", "/metrics", self.metrics_page, admin=True)
+        self.route("GET", "/version", self.version, admin=True)
+        self.route("GET", "/admin/flags", self.admin_flags, admin=True)
+        self.route("POST", "/admin/flags/{name}/kill", self.admin_kill, admin=True)
+        self.route("POST", "/admin/flags/{name}/revive", self.admin_revive, admin=True)
 
     def _flags_loaded(self) -> None:
         if not self.flags.loaded:
             raise RuntimeError("flags not loaded")
 
-    def route(self, method: str, template: str, handler: Handler) -> None:
+    def route(self, method: str, template: str, handler: Handler, *, admin: bool = False) -> None:
         pattern = re.compile("^" + re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", template) + "$")
-        self._routes.append((method, pattern, template, handler))
+        (self._admin_routes if admin else self._routes).append((method, pattern, template, handler))
 
-    def _match(self, method: str, path: str) -> tuple[str, Handler | None, dict[str, str], bool]:
-        path_matched = False
-        for m, pattern, template, handler in self._routes:
-            match = pattern.match(path)
-            if match:
-                path_matched = True
-                if m == method:
-                    return template, handler, match.groupdict(), True
-        return ("unmatched" if not path_matched else path), None, {}, path_matched
+    # WSGI entry points
+    def __call__(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
+        """The public listener."""
+        return self._dispatch(self._routes, "public", environ, start_response)
 
-    # WSGI entry point
-    def __call__(self, environ: dict[str, Any], start_response: Callable) -> Iterable[bytes]:
+    def admin(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
+        """The admin listener: bind it to an address the internet cannot reach."""
+        return self._dispatch(self._admin_routes, "admin", environ, start_response)
+
+    def _dispatch(
+        self,
+        routes: list[Route],
+        listener: str,
+        environ: dict[str, Any],
+        start_response: StartResponse,
+    ) -> Iterable[bytes]:
         t0 = time.perf_counter()
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO", "/") or "/"
@@ -140,7 +178,8 @@ class App:
         incoming = headers.get("x-request-id", "")
         rid = incoming if REQUEST_ID.match(incoming) else uuid.uuid4().hex
         rid_token = logs.request_id.set(rid)
-        template, handler, params, path_ok = self._match(method, path)
+        template, handler, params = _match(routes, method, path)
+        path_ok = template != "unmatched"
         parent = parse_traceparent(headers.get("traceparent"))
         try:
             with self.tracer.span(f"{method} {template}", parent=parent, method=method) as span:
@@ -162,15 +201,22 @@ class App:
                 traceparent = span.context.traceparent()
                 # Logged inside the span so the access log line carries the trace id.
                 elapsed = time.perf_counter() - t0
-                labels = {"route": template, "method": method, "status": str(resp.status)}
-                self.metrics.inc("http_requests_total", **labels)
-                self.metrics.observe("http_request_duration_seconds", elapsed, route=template)
+                labels: dict[str, str] = {
+                    "listener": listener,
+                    "route": template,
+                    "method": method if method in KNOWN_METHODS else "other",
+                    "status": str(resp.status),
+                }
+                self.metrics.inc("http_requests_total", 1.0, **labels)
+                self.metrics.observe(
+                    "http_request_duration_seconds", elapsed, listener=listener, route=template
+                )
                 if template not in ("/healthz", "/readyz", "/metrics"):
                     log.info(
                         "request",
                         extra={
                             "route": template,
-                            "method": method,
+                            "method": labels["method"],
                             "status": resp.status,
                             "ms": round(elapsed * 1000, 2),
                         },
@@ -217,13 +263,42 @@ class App:
         )
 
     def profile(self, req: Request) -> Response:
-        purpose = req.query.get("purpose", "service")
-        fields = [f for f in req.query.get("fields", "id,display_name,plan").split(",") if f]
-        actor = req.header("x-actor") or "anonymous"
-        with self.tracer.span("db.read", purpose=purpose):
+        """Read a profile. Who is asking, and for what, comes from the token.
+
+        The caller may narrow the field list with ``?fields=``; it cannot add
+        fields its role does not have or pick a purpose. A ``purpose`` or
+        ``actor`` in the request is refused rather than silently ignored, so
+        an old client that still sends them fails visibly.
+        """
+        try:
+            who = authenticate(req.header("authorization"), self.settings.auth_signing_key)
+        except AuthError as exc:
+            return Response(
+                401, {"error": str(exc)}, headers=(("WWW-Authenticate", 'Bearer realm="api"'),)
+            )
+        if "purpose" in req.query or req.header("x-actor") is not None:
+            return Response(400, {"error": "purpose and actor are set by the server"})
+        policy = who.policy
+        user_id = req.params["user_id"]
+        if policy.own_records_only and user_id != who.subject:
+            self.store.record_denied(
+                who.actor, user_id, policy.purpose, "denied_not_owner", req.request_id
+            )
+            return Response(403, {"error": "denied_not_owner"})
+        fields = list(policy.fields)
+        if "fields" in req.query:
+            asked = [f for f in req.query["fields"].split(",") if f]
+            extra = sorted(set(asked) - set(policy.fields))
+            if extra:
+                self.store.record_denied(
+                    who.actor, user_id, policy.purpose, "denied_role_fields", req.request_id
+                )
+                return Response(403, {"error": "denied_role_fields", "fields": extra})
+            fields = asked
+        with self.tracer.span("db.read", purpose=policy.purpose):
             try:
                 result = self.store.read(
-                    req.params["user_id"], purpose, fields, actor=actor, request_id=req.request_id
+                    user_id, policy.purpose, fields, actor=who.actor, request_id=req.request_id
                 )
             except PurposeError as exc:
                 return Response(400, {"error": str(exc)})
@@ -234,7 +309,15 @@ class App:
         return Response(200, {"data": result.data, "withheld": list(result.withheld)})
 
     def recommendations(self, req: Request) -> Response:
-        user = req.header("x-user-id")
+        # Bucket by the authenticated subject when there is one. Otherwise
+        # X-User-Id stands in for an anonymous id cookie: it only picks a
+        # bucket, it grants nothing, so trusting it costs nothing.
+        try:
+            user: str | None = authenticate(
+                req.header("authorization"), self.settings.auth_signing_key
+            ).subject
+        except AuthError:
+            user = req.header("x-user-id")
         ev = self.flags.evaluate("new_recs", user)
         self.metrics.inc("flag_evaluations_total", flag="new_recs", result=str(ev.enabled).lower())
         if ev.enabled:

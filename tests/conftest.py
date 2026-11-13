@@ -7,16 +7,23 @@ from typing import Any
 import pytest
 
 from livesvc.app import App
+from livesvc.auth import mint
 from livesvc.config import Settings
 from livesvc.data import Store
 from livesvc.flags import Flags, parse_flags
 
 ADMIN = "t" * 40
+SIGNING = "k" * 40
+
+
+def bearer(subject: str, role: str, ttl_s: float = 300) -> dict[str, str]:
+    return {"authorization": f"Bearer {mint(SIGNING, subject, role, ttl_s)}"}
 
 
 class Client:
-    def __init__(self, app: App) -> None:
+    def __init__(self, app: App, admin: bool = False) -> None:
         self.app = app
+        self.wsgi = app.admin if admin else app
 
     def request(
         self, method: str, path: str, headers: dict[str, str] | None = None
@@ -36,7 +43,7 @@ class Client:
             captured["status"] = int(status.split()[0])
             captured["headers"] = {k.lower(): v for k, v in hdrs}
 
-        body = b"".join(self.app(environ, start_response))
+        body = b"".join(self.wsgi(environ, start_response))
         ctype = captured["headers"]["content-type"]
         parsed = json.loads(body) if ctype == "application/json" else body.decode()
         return captured["status"], captured["headers"], parsed
@@ -68,9 +75,17 @@ def flags():
 
 @pytest.fixture
 def app(store, flags):
-    return App(Settings(env="test", release="abc123", admin_token=ADMIN), store, flags)
+    settings = Settings(env="test", release="abc123", admin_token=ADMIN, auth_signing_key=SIGNING)
+    a = App(settings, store, flags)
+    yield a
+    a.health.close()
 
 
 @pytest.fixture
 def client(app):
     return Client(app)
+
+
+@pytest.fixture
+def admin_client(app):
+    return Client(app, admin=True)

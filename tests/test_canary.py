@@ -46,3 +46,14 @@ def test_cli_exit_codes(tmp_path, capsys):
     c.write_text(scrape(995, 5, 0.03))
     assert main([str(b), str(c)]) == 0
     assert main([str(b), str(c), "--min-requests", "5000"]) == 3
+
+
+def test_admin_listener_traffic_is_ignored():
+    text = "\n".join(
+        [
+            'http_requests_total{listener="public",method="GET",route="/api/x",status="200"} 100',
+            'http_requests_total{listener="admin",method="GET",route="/version",status="500"} 50',
+        ]
+    )
+    s = stats_from_metrics(text)
+    assert s.requests == 100 and s.errors == 0
