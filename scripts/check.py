@@ -98,6 +98,8 @@ SKIP_DIRS = {
     "venv",
     ".pytest_cache",
     ".ruff_cache",
+    ".mypy_cache",
+    ".hypothesis",
     "build",
     "dist",
 }

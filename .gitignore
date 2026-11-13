@@ -8,6 +8,8 @@ venv/
 *.log
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.hypothesis/
 *.egg-info/
 build/
 dist/

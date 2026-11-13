@@ -8,6 +8,7 @@ install:
 lint:
 	ruff check .
 	ruff format --check .
+	mypy
 	$(PY) scripts/check.py
 
 test:
