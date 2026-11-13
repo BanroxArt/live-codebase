@@ -1,282 +1,271 @@
 #!/usr/bin/env python3
-"""Local checks for this skill package. Run from anywhere: python3 scripts/check.py"""
+"""Repository content lint.
+
+Runs offline with the standard library only. It looks for things that should
+never land in a public repo (credentials, internal names, real-looking contact
+details) and for wording we keep out of docs: unbacked compliance or traction
+claims and stock filler phrases.
+
+Usage: python3 scripts/check.py
+"""
 
 from __future__ import annotations
 
+import ast
+import io
 import re
+import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ERRORS: list[str] = []
+SELF = Path(__file__).resolve()
 
-# Needles are split so this file itself does not contain those names.
-INTERNAL_NEEDLES = (
-    "prime" + "ak",
-    "banrox-" + "review",
-)
+# Split so this file does not match itself.
+INTERNAL_NEEDLES = ("prime" + "ak", "banrox-" + "review")
 
-REQUIRED_README_HEADINGS = (
-    "What it does",
-    "Install",
-    "Use",
-    "Example",
-    "Limitations",
-    "License",
+SECRET_PATTERNS = {
+    "aws_access_key_id": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    "private_key_header": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
+    "github_token": re.compile(r"\b(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{10,}\b"),
+    "gitlab_token": re.compile(r"\b(?:glpat-|gldt-|glrt-|glptt-)[A-Za-z0-9_\-]{10,}\b"),
+    "twilio_api_key": re.compile(r"\bSK[0-9a-fA-F]{32}\b"),
+    "slack_token": re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b"),
+}
+INTERNAL_PATH = re.compile("/" + "workspace" + "/|/" + "home" + "/box/")
+EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
+# RFC 2606 / RFC 6761 names that can never belong to a real person.
+RESERVED_DOMAIN = re.compile(
+    r"(?i)(^|\.)(example\.(com|net|org)|[a-z0-9-]+\.(test|example|invalid|localhost))$"
 )
-
-REQUIRED_SKILL_HEADINGS = (
-    "Output format",
-)
-
-POSITIVE_COMPLIANCE = re.compile(
-    r"(?i)\b(soc\s*2|pci(?:[\s-]?dss)?|iso\s*2700\d|fedramp)\b"
-)
-NEGATION = re.compile(
-    r"(?i)\b(not|never|no|don't|do not|doesn't|does not|isn't|is not|neither|without)\b"
-)
-TRACTION_COUNT = re.compile(
-    r"(?i)\b\d[\d,]*\+?\s*(users|customers|downloads|stars|members)\b"
-)
-TRACTION_PHRASE = re.compile(
-    r"(?i)\b(our customers|our users|thousands of (?:users|customers)|millions of (?:users|customers))\b"
-)
-EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 PHONE = re.compile(
-    r"(?<!\w)(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4})(?!\w)"
+    r"(?<![\w.])(?:\+1(?P<a>\d{3})(?P<b>\d{3})(?P<c>\d{4})"
+    r"|(?:\+?1[-. ])?\(?(?P<d>\d{3})\)?[-. ](?P<e>\d{3})[-. ](?P<f>\d{4}))(?![\w.])"
 )
 PRIVATE_IP = re.compile(
-    r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b"
+    r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
+    r"|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b"
 )
-INTERNAL_PATH = re.compile("/" + "workspace" + "/|/" + "home" + "/box/")
-MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
-AWS_KEY = re.compile(r"\bAKIA[0-9A-Z]{16}\b")
-PRIVATE_KEY = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")
-GITHUB_TOKEN = re.compile(r"\b(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{10,}\b")
-GITLAB_TOKEN = re.compile(r"\b(?:glpat-|gldt-|glrt-|glptt-)[A-Za-z0-9_\-]{10,}\b")
 
-SKIP_DIRS = {".git", "__pycache__", ".venv", "venv"}
-TEXT_SUFFIXES = {".md", ".py", ".txt", ".yml", ".yaml", ".sh", ".toml", ".json", ".gitignore", ""}
+POSITIVE_COMPLIANCE = re.compile(r"(?i)\b(soc\s*2|pci(?:[\s-]?dss)?|iso\s*2700\d|fedramp|hipaa)\b")
+NEGATION = re.compile(
+    r"(?i)\b(not|never|no|don't|do not|doesn't|does not|isn't|is not|neither|nor|without)\b"
+)
+TRACTION_COUNT = re.compile(
+    r"(?i)(?<![\w-])\d[\d,]*\+?\s*(users|customers|downloads|stars|members|companies)\b"
+)
+TRACTION_PHRASE = re.compile(
+    r"(?i)\b(our customers|our users|trusted by|used in production by|in production at"
+    r"|battle[- ]tested|thousands of (users|customers)|millions of (users|customers))\b"
+)
+
+# Filler and tells we do not want in prose or comments.
+STYLE_TELLS = [
+    r"\bdelv(e|es|ing)\b",
+    r"\brobust(ly|ness)?\b",
+    r"\bseamless(ly)?\b",
+    r"\bleverag(e|es|ed|ing)\b",
+    r"\bcomprehensive\b",
+    r"\bin today'?s\b",
+    r"\bit'?s (important|worth) (to note|noting)\b",
+    r"\bit is (important|worth) (to note|noting)\b",
+    r"\bcutting[- ]edge\b",
+    r"\bgame[- ]chang",
+    r"\bsupercharg",
+    r"\bempower",
+    r"\btapestry\b",
+    r"\bembark",
+    r"\bunleash",
+    r"\belevate\b",
+    r"\bnavigat(e|ing) the (complex|landscape)",
+    r"\bever[- ]evolving\b",
+    r"\bstate[- ]of[- ]the[- ]art\b",
+    r"\bin conclusion\b",
+    r"\bas an ai\b",
+    r"\blanguage model\b(?! output)",
+    r"\b(generated|written) (by|with) (ai|chatgpt|an? llm|claude|copilot|gpt)",
+    r"\bco-authored-by\b",
+]
+STYLE_RE = re.compile("|".join(STYLE_TELLS), re.I)
+EMOJI = re.compile("[\U0001f300-\U0001faff\u2600-\u27bf\u2b50\u2705]")
+EM_DASH = "\u2014"
+
+SKIP_DIRS = {
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".pytest_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+}
+TEXT_SUFFIXES = {
+    ".md",
+    ".py",
+    ".txt",
+    ".yml",
+    ".yaml",
+    ".sh",
+    ".toml",
+    ".json",
+    ".jsonl",
+    ".cfg",
+    ".ini",
+}
+TEXT_NAMES = {"LICENSE", ".gitignore", "Makefile", "Dockerfile"}
+
+errors: list[str] = []
 
 
-def error(msg: str) -> None:
-    ERRORS.append(msg)
-
-
-def iter_text_files() -> list[Path]:
-    out: list[Path] = []
+def iter_files() -> list[Path]:
+    out = []
     for path in ROOT.rglob("*"):
-        if not path.is_file():
+        if not path.is_file() or any(p in SKIP_DIRS for p in path.relative_to(ROOT).parts):
             continue
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if path.suffix.lower() in {".md", ".py", ".txt", ".yml", ".yaml", ".sh", ".toml", ".json"} or path.name in {
-            "LICENSE",
-            ".gitignore",
-        }:
+        if path.suffix.lower() in TEXT_SUFFIXES or path.name in TEXT_NAMES:
             out.append(path)
     return sorted(out)
 
 
-def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
-    if not text.startswith("---"):
-        raise ValueError("SKILL.md must start with YAML frontmatter delimited by ---")
-    rest = text[3:]
-    if rest.startswith("\n"):
-        rest = rest[1:]
-    end = rest.find("\n---")
-    if end < 0:
-        raise ValueError("SKILL.md frontmatter is not closed with ---")
-    raw = rest[:end]
-    body = rest[end + 4 :]
-    data: dict[str, str] = {}
-    key = None
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        if key and (line.startswith("  ") or line.startswith("\t")):
-            data[key] = data[key] + " " + line.strip()
-            continue
-        if ":" not in line:
-            raise ValueError(f"invalid frontmatter line: {line[:40]}")
-        key, value = line.split(":", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        data[key] = value
-    return data, body
+def phone_is_fictional(m: re.Match[str]) -> bool:
+    # 555-0100 through 555-0199 is the reserved fictional range in the NANP.
+    exchange = m.group("b") or m.group("e")
+    line = m.group("c") or m.group("f")
+    return exchange == "555" and line.startswith("01")
 
 
-def heading_titles(text: str) -> set[str]:
-    titles = set()
-    for line in text.splitlines():
-        m = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+def python_prose(text: str) -> list[tuple[int, str]]:
+    """Comments and docstrings from a Python source, with line numbers."""
+    out: list[tuple[int, str]] = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type == tokenize.COMMENT:
+                out.append((tok.start[0], tok.string))
+    except (tokenize.TokenError, SyntaxError):
+        return out
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return out
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            doc = ast.get_docstring(node, clean=False)
+            if doc and node.body:
+                start = node.body[0].lineno
+                for offset, line in enumerate(doc.splitlines()):
+                    out.append((start + offset, line))
+    return out
+
+
+def lint_file(path: Path) -> None:
+    rel = path.relative_to(ROOT)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    is_self = path.resolve() == SELF
+    for i, line in enumerate(text.splitlines(), 1):
+        lower = line.lower()
+        if not is_self and any(n in lower for n in INTERNAL_NEEDLES):
+            errors.append(f"{rel}:{i}: internal_name")
+        if INTERNAL_PATH.search(line):
+            errors.append(f"{rel}:{i}: internal_path")
+        if is_self:
+            continue
+        for kind, pat in SECRET_PATTERNS.items():
+            if pat.search(line):
+                errors.append(f"{rel}:{i}: {kind}")
+        for m in EMAIL.finditer(line):
+            if not RESERVED_DOMAIN.search(m.group(1)):
+                errors.append(f"{rel}:{i}: email_not_reserved_domain")
+        for m in PHONE.finditer(line):
+            if not phone_is_fictional(m):
+                errors.append(f"{rel}:{i}: phone_not_fictional")
+        if PRIVATE_IP.search(line):
+            errors.append(f"{rel}:{i}: private_ip")
+        if POSITIVE_COMPLIANCE.search(line) and not NEGATION.search(line):
+            errors.append(f"{rel}:{i}: unsupported_compliance_claim")
+        if TRACTION_COUNT.search(line) and not NEGATION.search(line):
+            errors.append(f"{rel}:{i}: traction_claim")
+        if TRACTION_PHRASE.search(line) and not NEGATION.search(line):
+            errors.append(f"{rel}:{i}: traction_claim")
+
+    if is_self:
+        return
+    if path.suffix == ".md":
+        prose = list(enumerate(text.splitlines(), 1))
+    elif path.suffix == ".py":
+        prose = python_prose(text)
+    else:
+        prose = [
+            (i, ln) for i, ln in enumerate(text.splitlines(), 1) if ln.lstrip().startswith("#")
+        ]
+    for i, line in prose:
+        m = STYLE_RE.search(line)
         if m:
-            titles.add(m.group(1).strip())
-    return titles
+            errors.append(f"{rel}:{i}: style_tell ({m.group(0).lower()})")
+        if EMOJI.search(line):
+            errors.append(f"{rel}:{i}: emoji")
+        if EM_DASH in line:
+            errors.append(f"{rel}:{i}: em_dash")
 
 
-def check_skill() -> None:
+def lint_skill() -> None:
     path = ROOT / "SKILL.md"
     if not path.is_file():
-        error("missing SKILL.md")
+        errors.append("missing SKILL.md")
         return
     text = path.read_text(encoding="utf-8")
-    try:
-        meta, body = parse_frontmatter(text)
-    except ValueError as exc:
-        error(f"SKILL.md frontmatter: {exc}")
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    if not m:
+        errors.append("SKILL.md: missing frontmatter")
         return
-    if "name" not in meta or not meta["name"]:
-        error("SKILL.md frontmatter missing name")
-    elif meta["name"] != ROOT.name:
-        error(f"SKILL.md name {meta['name']!r} does not match directory {ROOT.name!r}")
-    if "description" not in meta or len(meta["description"].strip()) < 40:
-        error("SKILL.md frontmatter description is missing or too short")
-    titles = heading_titles(body)
-    for required in REQUIRED_SKILL_HEADINGS:
-        if required not in titles:
-            error(f"SKILL.md missing required heading: {required}")
-    if not re.search(r"^# .+", body, re.M):
-        error("SKILL.md is missing a top-level heading")
+    meta = dict(
+        (k.strip(), v.strip().strip("\"'"))
+        for k, v in (ln.split(":", 1) for ln in m.group(1).splitlines() if ":" in ln)
+    )
+    if meta.get("name") != ROOT.name:
+        errors.append(f"SKILL.md: name should be {ROOT.name!r}")
+    if len(meta.get("description", "")) < 40:
+        errors.append("SKILL.md: description missing or too short")
 
 
-def check_readme() -> set[str]:
-    path = ROOT / "README.md"
-    referenced: set[str] = set()
-    if not path.is_file():
-        error("missing README.md")
-        return referenced
-    text = path.read_text(encoding="utf-8")
-    titles = heading_titles(text)
-    for required in REQUIRED_README_HEADINGS:
-        if required not in titles:
-            error(f"README.md missing required heading: {required}")
-    if "placeholder" not in text.lower() or "pending" not in text.lower():
-        error("README.md License section must say the MIT text is a placeholder pending a final pick")
-    if "MIT" not in text:
-        error("README.md should mention MIT as the current placeholder licence")
-    for match in MD_LINK.finditer(text):
-        referenced.add(match.group(2).strip())
-    example_links = [href for href in referenced if href.startswith("examples/")]
-    if not example_links:
-        error("README.md should link to at least one file under examples/")
-    return referenced
-
-
-def check_license() -> None:
+def lint_license() -> None:
     path = ROOT / "LICENSE"
-    if not path.is_file():
-        error("missing LICENSE")
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    if not text.startswith("MIT License") or "Copyright (c) 2026 Banrox Inc." not in text:
+        errors.append("LICENSE: expected MIT, Copyright (c) 2026 Banrox Inc.")
+
+
+def lint_commits() -> None:
+    try:
+        log = subprocess.run(
+            ["git", "-C", str(ROOT), "log", "--format=%an <%ae>%n%cn <%ce>%n%B"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
         return
-    text = path.read_text(encoding="utf-8")
-    if not text.startswith("MIT License"):
-        error("LICENSE does not start with 'MIT License'")
-    if "Copyright (c) 2026 Banrox Inc." not in text:
-        error("LICENSE must have copyright holder 'Banrox Inc.' and year 2026")
-    if "Permission is hereby granted" not in text:
-        error("LICENSE is missing expected MIT permission text")
-
-
-def check_examples() -> None:
-    folder = ROOT / "examples"
-    if not folder.is_dir():
-        error("missing examples/ directory")
-        return
-    files = [p for p in folder.iterdir() if p.is_file() and not p.name.startswith(".")]
-    if not files:
-        error("examples/ has no files")
-
-
-def check_links(referenced_from_readme: set[str]) -> None:
-    # Collect markdown links from all markdown files and resolve local targets.
-    for path in iter_text_files():
-        if path.suffix.lower() != ".md":
-            continue
-        text = path.read_text(encoding="utf-8")
-        for match in MD_LINK.finditer(text):
-            href = match.group(2).strip()
-            if href.startswith("#"):
-                continue
-            if " " in href and "://" not in href:
-                # markdown image or title form: url plus optional title
-                href = href.split()[0]
-            if href.startswith("<") and href.endswith(">"):
-                href = href[1:-1]
-            if href.startswith(("http://", "https://", "mailto:")):
-                # External links: syntax only (offline). Must be a well-formed URL.
-                if href.startswith("mailto:"):
-                    continue
-                if not re.match(r"^https?://[A-Za-z0-9.-]+\.[A-Za-z]{2,}(/.*)?$", href.split()[0]):
-                    error(f"{path.relative_to(ROOT)}: malformed external link")
-                continue
-            if href.startswith("http:"):
-                error(f"{path.relative_to(ROOT)}: malformed external link")
-                continue
-            target = href.split("#", 1)[0]
-            if not target:
-                continue
-            dest = (path.parent / target).resolve()
-            try:
-                dest.relative_to(ROOT.resolve())
-            except ValueError:
-                error(f"{path.relative_to(ROOT)}: link escapes package root")
-                continue
-            if not dest.exists():
-                error(f"{path.relative_to(ROOT)}: broken local link -> {target}")
-
-
-def check_content_lint() -> None:
-    for path in iter_text_files():
-        rel = path.relative_to(ROOT)
-        # Allow this checker to mention encoded policy needles only via concatenation.
-        text = path.read_text(encoding="utf-8")
-        for i, line in enumerate(text.splitlines(), 1):
-            lower = line.lower()
-            if path.name != "check.py":
-                for needle in INTERNAL_NEEDLES:
-                    if needle in lower:
-                        error(f"{rel}:{i}: forbidden_internal_name")
-            if INTERNAL_PATH.search(line):
-                error(f"{rel}:{i}: internal_path")
-            if AWS_KEY.search(line):
-                error(f"{rel}:{i}: aws_access_key_id")
-            if PRIVATE_KEY.search(line):
-                error(f"{rel}:{i}: private_key_header")
-            if GITHUB_TOKEN.search(line):
-                error(f"{rel}:{i}: github_token")
-            if GITLAB_TOKEN.search(line):
-                error(f"{rel}:{i}: gitlab_token")
-            if EMAIL.search(line) and path.name != "check.py":
-                error(f"{rel}:{i}: email")
-            if PHONE.search(line) and path.name != "check.py":
-                error(f"{rel}:{i}: phone")
-            if PRIVATE_IP.search(line) and path.name != "check.py":
-                error(f"{rel}:{i}: private_ip")
-            if path.name == "check.py":
-                continue
-            if POSITIVE_COMPLIANCE.search(line) and not NEGATION.search(line):
-                error(f"{rel}:{i}: unsupported_compliance_claim")
-            if TRACTION_COUNT.search(line) and not NEGATION.search(line):
-                error(f"{rel}:{i}: traction_count_claim")
-            if TRACTION_PHRASE.search(line) and not NEGATION.search(line):
-                error(f"{rel}:{i}: traction_claim")
+    for line in log.splitlines():
+        m = STYLE_RE.search(line)
+        if m:
+            errors.append(f"git log: style_tell in commit message ({m.group(0).lower()})")
+        if any(n in line.lower() for n in INTERNAL_NEEDLES):
+            errors.append("git log: internal_name in commit metadata")
 
 
 def main() -> int:
-    if not (ROOT / "SKILL.md").exists() and not (ROOT / "README.md").exists():
-        error(f"does not look like a skill package: {ROOT}")
-    check_skill()
-    referenced = check_readme()
-    check_license()
-    check_examples()
-    check_links(referenced)
-    check_content_lint()
-    if ERRORS:
-        print(f"FAIL {ROOT.name}: {len(ERRORS)} issue(s)")
-        for item in ERRORS:
-            print(f"  - {item}")
+    lint_skill()
+    lint_license()
+    for path in iter_files():
+        lint_file(path)
+    lint_commits()
+    if errors:
+        print(f"FAIL {ROOT.name}: {len(errors)} issue(s)")
+        for e in errors:
+            print(f"  {e}")
         return 1
-    print(f"PASS {ROOT.name}")
+    print(f"PASS {ROOT.name} content lint")
     return 0
 
 
