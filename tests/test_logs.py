@@ -2,6 +2,8 @@ import io
 import json
 import logging
 
+import pytest
+
 from livesvc import logs
 
 
@@ -65,3 +67,18 @@ def test_exceptions_are_logged():
         log.exception("failed")
     (doc,) = lines(buf)
     assert "ValueError: boom" in doc["exc"]
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["password", "apiKey", "api_key", "X-Auth-Token", "card_number", "accountNumber", "set-cookie"],
+)
+def test_sensitive_key_words(key):
+    assert logs.sensitive_key(key)
+
+
+@pytest.mark.parametrize("key", ["discard_count", "bypass_cache", "compass", "user", "passenger"])
+def test_substrings_are_not_sensitive(key):
+    # Regression: substring matching redacted "discard_count" (card) and
+    # "bypass_cache" (pass), hiding useful fields from the logs.
+    assert not logs.sensitive_key(key)

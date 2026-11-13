@@ -74,8 +74,20 @@ class Span:
 
 
 class Tracer:
-    def __init__(self, sample_rate: float = 1.0, keep: int = 1000) -> None:
+    """In-process tracer.
+
+    ``trust_parent`` controls whether an inbound ``traceparent`` decides
+    sampling. The trace id is always continued so logs line up with the
+    caller; the sampled bit is only honoured when the caller is trusted
+    (another service of yours behind the same edge). Otherwise any client can
+    send ``-01`` and force every request to be recorded.
+    """
+
+    def __init__(
+        self, sample_rate: float = 1.0, keep: int = 1000, trust_parent: bool = False
+    ) -> None:
         self.sample_rate = sample_rate
+        self.trust_parent = trust_parent
         self.finished: deque[Span] = deque(maxlen=keep)
 
     def current(self) -> Span | None:
@@ -84,9 +96,13 @@ class Tracer:
     @contextlib.contextmanager
     def span(self, name: str, parent: SpanContext | None = None, **attrs: Any) -> Iterator[Span]:
         active = _current.get()
+        remote = parent is not None
         parent = parent or (active.context if active else None)
         if parent:
-            ctx = SpanContext(parent.trace_id, _hex(8), parent.sampled)
+            sampled = parent.sampled
+            if remote and not self.trust_parent:
+                sampled = random.random() < self.sample_rate
+            ctx = SpanContext(parent.trace_id, _hex(8), sampled)
         else:
             ctx = SpanContext(_hex(16), _hex(8), random.random() < self.sample_rate)
         sp = Span(name, ctx, parent.span_id if parent else None, attributes=dict(attrs))
@@ -108,9 +124,9 @@ class Tracer:
 class OtelTracer(Tracer):
     """Same API, backed by opentelemetry-api."""
 
-    def __init__(self, sample_rate: float = 1.0) -> None:
-        super().__init__(sample_rate)
-        from opentelemetry import trace  # type: ignore[import-not-found]
+    def __init__(self, sample_rate: float = 1.0, trust_parent: bool = False) -> None:
+        super().__init__(sample_rate, trust_parent=trust_parent)
+        from opentelemetry import trace
 
         self._otel = trace.get_tracer("livesvc")
 
@@ -122,8 +138,8 @@ class OtelTracer(Tracer):
             yield sp
 
 
-def make_tracer(sample_rate: float = 1.0) -> Tracer:
+def make_tracer(sample_rate: float = 1.0, trust_parent: bool = False) -> Tracer:
     try:
-        return OtelTracer(sample_rate)
+        return OtelTracer(sample_rate, trust_parent=trust_parent)
     except ImportError:
-        return Tracer(sample_rate)
+        return Tracer(sample_rate, trust_parent=trust_parent)

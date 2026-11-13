@@ -9,6 +9,7 @@ net, not permission to log sensitive data on purpose.
 from __future__ import annotations
 
 import contextvars
+import itertools
 import json
 import logging
 import re
@@ -19,9 +20,49 @@ from typing import Any
 request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("request_id", default=None)
 trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("trace_id", default=None)
 
-SENSITIVE_KEYS = re.compile(
-    r"(?i)(pass(word)?|secret|token|authorization|cookie|api[_-]?key|ssn|card|cvv|iban|account_number)"
+# Matched against the words of a key, not substrings: "card_number" and
+# "apiKey" are redacted, "discard_count" and "bypass_cache" are not.
+SENSITIVE_WORDS = frozenset(
+    {
+        "pass",
+        "passwd",
+        "password",
+        "passphrase",
+        "secret",
+        "token",
+        "authorization",
+        "auth",
+        "cookie",
+        "apikey",
+        "ssn",
+        "card",
+        "cvv",
+        "cvc",
+        "iban",
+        "pan",
+        "pin",
+        "otp",
+        "credential",
+        "credentials",
+        "accountnumber",
+        "privatekey",
+    }
 )
+_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+
+
+def _key_words(key: str) -> list[str]:
+    return [w.lower() for w in _WORD.findall(key)]
+
+
+def sensitive_key(key: str) -> bool:
+    words = _key_words(key)
+    if any(w in SENSITIVE_WORDS for w in words):
+        return True
+    # Two-word names that are only sensitive together: api_key, account_number.
+    return any(a + b in SENSITIVE_WORDS for a, b in itertools.pairwise(words))
+
+
 EMAIL = re.compile(r"\b([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
 # 13 to 19 digits with optional spaces or dashes: card-number shaped.
 PAN = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
@@ -53,7 +94,7 @@ def scrub_text(text: str) -> str:
 
 
 def scrub(value: Any, key: str = "") -> Any:
-    if key and SENSITIVE_KEYS.search(key):
+    if key and sensitive_key(key):
         return "[redacted]"
     if isinstance(value, dict):
         return {k: scrub(v, str(k)) for k, v in value.items()}
