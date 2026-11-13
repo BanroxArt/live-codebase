@@ -1,9 +1,18 @@
-"""Consent-aware data access.
+"""Purpose-scoped data access with consent checks.
 
 Application code asks for fields *for a purpose*. The layer checks the
 purpose is allowed for those fields, checks the user's consent for purposes
 that need it, masks or drops what is not allowed, and writes an audit row for
 every read, allowed or not.
+
+The purpose has to come from something the server trusts. In ``app.py`` it
+comes from the caller's role (``auth.ROLES``), never from the request. This
+layer enforces the purpose it is given; it cannot tell a real purpose from a
+claimed one.
+
+Every method that touches the connection holds one re-entrant lock. SQLite
+connections are not safe to share across threads without that, and the
+readiness probe calls ``ping`` from its own thread.
 
 It also stamps each database with the environment that created it and
 refuses to open a database from another environment. Pointing a dev box at a
@@ -82,7 +91,7 @@ def mask_email(value: str) -> str:
 class Store:
     def __init__(self, path: str, env: str) -> None:
         self.env = env
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
@@ -94,33 +103,41 @@ class Store:
             raise EnvironmentMismatch(f"database belongs to {row[0]!r}, this process is {env!r}")
 
     def ping(self) -> None:
-        self.db.execute("SELECT 1").fetchone()
+        with self._lock:
+            self.db.execute("SELECT 1").fetchone()
 
     def add_user(self, user_id: str, display_name: str, email: str, plan: str = "free") -> None:
-        self.db.execute(
-            "INSERT INTO users (id, display_name, email, plan, created_at) VALUES (?, ?, ?, ?, ?)",
-            (user_id, display_name, email, plan, time.time()),
-        )
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO users (id, display_name, email, plan, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (user_id, display_name, email, plan, time.time()),
+            )
 
     def grant(self, user_id: str, purpose: str, version: str, at: float | None = None) -> None:
-        self.db.execute(
-            "INSERT INTO consents (user_id, purpose, version, granted_at) VALUES (?, ?, ?, ?)",
-            (user_id, purpose, version, at if at is not None else time.time()),
-        )
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO consents (user_id, purpose, version, granted_at) VALUES (?, ?, ?, ?)",
+                (user_id, purpose, version, at if at is not None else time.time()),
+            )
 
     def revoke(self, user_id: str, purpose: str, at: float | None = None) -> int:
-        cur = self.db.execute(
-            "UPDATE consents SET revoked_at = ? WHERE user_id = ? AND purpose = ? AND revoked_at IS NULL",
-            (at if at is not None else time.time(), user_id, purpose),
-        )
-        return cur.rowcount
+        with self._lock:
+            cur = self.db.execute(
+                "UPDATE consents SET revoked_at = ?"
+                " WHERE user_id = ? AND purpose = ? AND revoked_at IS NULL",
+                (at if at is not None else time.time(), user_id, purpose),
+            )
+            return cur.rowcount
 
     def has_consent(self, user_id: str, purpose: str) -> bool:
-        row = self.db.execute(
-            "SELECT 1 FROM consents WHERE user_id = ? AND purpose = ? AND revoked_at IS NULL LIMIT 1",
-            (user_id, purpose),
-        ).fetchone()
-        return row is not None
+        with self._lock:
+            row = self.db.execute(
+                "SELECT 1 FROM consents"
+                " WHERE user_id = ? AND purpose = ? AND revoked_at IS NULL LIMIT 1",
+                (user_id, purpose),
+            ).fetchone()
+            return row is not None
 
     def _audit(
         self,
@@ -137,6 +154,13 @@ class Store:
             (time.time(), actor, user_id, purpose, ",".join(sorted(fields)), decision, request_id),
         )
 
+    def record_denied(
+        self, actor: str, user_id: str, purpose: str, decision: str, request_id: str | None
+    ) -> None:
+        """Audit a read the caller was refused before it reached the data layer."""
+        with self._lock:
+            self._audit(actor, user_id, purpose, (), decision, request_id)
+
     def read(
         self,
         user_id: str,
@@ -146,8 +170,8 @@ class Store:
         actor: str,
         request_id: str | None = None,
     ) -> ReadResult | None:
-        # One connection shared across request threads; serialise reads so the
-        # audit row and the data read cannot interleave with another request.
+        # The audit row and the data read must not interleave with another
+        # request on the shared connection.
         with self._lock:
             return self._read(user_id, purpose, fields, actor, request_id)
 
@@ -156,10 +180,13 @@ class Store:
     ) -> ReadResult | None:
         fields = tuple(dict.fromkeys(fields))
         if purpose not in PURPOSE_FIELDS:
+            # Audit the attempt before refusing, so probing shows up too.
+            self._audit(actor, user_id, "?", (), "rejected_purpose", request_id)
             raise PurposeError(f"unknown purpose {purpose!r}")
         allowed = PURPOSE_FIELDS[purpose]
         unknown = [f for f in fields if f not in PURPOSE_FIELDS["service"]]
         if unknown:
+            self._audit(actor, user_id, purpose, (), "rejected_fields", request_id)
             raise PurposeError(f"unknown fields {unknown}")
         if purpose in CONSENT_REQUIRED and not self.has_consent(user_id, purpose):
             self._audit(actor, user_id, purpose, fields, "denied_no_consent", request_id)
@@ -182,11 +209,15 @@ class Store:
         self._audit(actor, user_id, purpose, fields, decision, request_id)
         return ReadResult(data, withheld, decision)
 
-    def access_log(self, user_id: str) -> list[tuple]:
-        return self.db.execute(
-            "SELECT actor, purpose, fields, decision FROM access_log WHERE user_id = ? ORDER BY ts",
-            (user_id,),
-        ).fetchall()
+    def access_log(self, user_id: str) -> list[tuple[str, str, str, str]]:
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT actor, purpose, fields, decision FROM access_log"
+                " WHERE user_id = ? ORDER BY ts, rowid",
+                (user_id,),
+            ).fetchall()
+            return [tuple(r) for r in rows]
 
     def close(self) -> None:
-        self.db.close()
+        with self._lock:
+            self.db.close()

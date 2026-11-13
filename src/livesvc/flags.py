@@ -171,7 +171,8 @@ class Flags:
         log.warning("kill switch off", extra={"flag": name})
 
     def killed(self) -> set[str]:
-        return set(self._killed)
+        with self._lock:
+            return set(self._killed)
 
     def _maybe_reload(self) -> None:
         # Cheap stat at most every check_every_s; keeps every worker in step
@@ -206,18 +207,24 @@ class Flags:
 
     def stale(self, today: date | None = None) -> list[Flag]:
         today = today or date.today()
-        return [f for f in self._flags.values() if f.remove_by and f.remove_by < today]
+        with self._lock:
+            flags = list(self._flags.values())
+        return [f for f in flags if f.remove_by and f.remove_by < today]
 
     def snapshot(self) -> dict[str, Any]:
+        # Copy under the lock; a reload swaps both while we would be iterating.
+        with self._lock:
+            flags = dict(self._flags)
+            killed = set(self._killed)
         return {
             "env": self.env,
-            "killed": sorted(self._killed | {n for n, f in self._flags.items() if f.killed}),
+            "killed": sorted(killed | {n for n, f in flags.items() if f.killed}),
             "flags": {
                 n: {
                     "owner": f.owner,
                     "rollout": f.rollout.get(self.env),
                     "remove_by": str(f.remove_by or ""),
                 }
-                for n, f in sorted(self._flags.items())
+                for n, f in sorted(flags.items())
             },
         }
