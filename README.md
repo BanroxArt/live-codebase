@@ -20,6 +20,7 @@ Standard library only; `opentelemetry-api` is optional.
 | `flags.py` | steer | Percentage rollouts with deterministic bucketing, allow/deny lists, three kinds of kill switch, hot reload, stale-flag report |
 | `auth.py` | data | Bearer token stub; the caller's role, not the request, decides purpose and fields |
 | `data.py` | data | Purpose-based field access, consent checks, masking, an audit row per read, and a database stamped with its environment |
+| `audit.py` | data | Append-only, hash-chained access log with a verifier, outside checkpoints and prefix pruning for retention |
 | `canary.py` | ship | Canary vs baseline comparison on error rate and p95, returns promote, hold or rollback |
 | `app.py` | all | The WSGI app wiring it together |
 
@@ -47,9 +48,10 @@ TOKEN=$(python -m livesvc.auth u1 user)
 curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/api/users/u1/profile   # 404 on an empty database, 401 without the token
 ```
 
-Configuration is environment only: `APP_ENV` (dev, test, staging, prod), `HOST`, `PORT`, `ADMIN_HOST`, `ADMIN_PORT`, `LOG_LEVEL`, `RELEASE` or `GIT_SHA`, `DATABASE_PATH`, `FLAGS_PATH`, `KILL_SWITCHES`, `ADMIN_TOKEN`, `AUTH_SIGNING_KEY`, `DRAIN_SECONDS`, `TRACE_SAMPLE_RATE`, `TRACE_TRUST_PARENT`.
+Configuration is environment only: `APP_ENV` (dev, test, staging, prod), `HOST`, `PORT`, `ADMIN_HOST`, `ADMIN_PORT`, `LOG_LEVEL`, `RELEASE` or `GIT_SHA`, `DATABASE_PATH`, `FLAGS_PATH`, `KILL_SWITCHES`, `ADMIN_TOKEN`, `AUTH_SIGNING_KEY`, `AUDIT_CHAIN_KEY`, `DRAIN_SECONDS`, `TRACE_SAMPLE_RATE`, `TRACE_TRUST_PARENT`.
 
 - Without `AUTH_SIGNING_KEY` the profile endpoint answers 401 to everyone. Prod refuses to start without it.
+- `AUDIT_CHAIN_KEY` (32+ characters) keys the access log hash chain. Without it the chain is plain SHA-256, which catches edits but can be recomputed by anyone with write access; prod logs a warning at start. The mode and a key id are stamped into the database, so changing or dropping the key later is refused rather than reported as tampering.
 - Admin endpoints are disabled unless `ADMIN_TOKEN` is set, and in prod it must be at least 32 characters.
 - The container image does not set `APP_ENV`, so it starts as dev. Set `APP_ENV=prod` in the deployment together with the two keys above.
 
@@ -58,7 +60,7 @@ Configuration is environment only: `APP_ENV` (dev, test, staging, prod), `HOST`,
 | Listener | Default bind | Routes |
 | --- | --- | --- |
 | public | `HOST:PORT` (`127.0.0.1:8080`, `0.0.0.0:8080` in the image) | `/healthz`, `/readyz`, `/api/*` |
-| admin | `ADMIN_HOST:ADMIN_PORT` (`127.0.0.1:9090`) | `/healthz`, `/readyz`, `/metrics`, `/version`, `/admin/*` |
+| admin | `ADMIN_HOST:ADMIN_PORT` (`127.0.0.1:9090`) | `/healthz`, `/readyz`, `/metrics`, `/version`, `/admin/*` (flags, `/admin/audit/head`) |
 
 Metrics, the build version and the kill switches are not routed on the public listener at all, so a proxy rule that forwards everything still cannot reach them. In a cluster, set `ADMIN_HOST=0.0.0.0` and expose the admin port to Prometheus and operators through a cluster-internal service, never through the ingress. The admin listener runs inside the gunicorn worker, which is why the image runs one worker with threads; scale with replicas.
 
@@ -82,6 +84,10 @@ Metrics, the build version and the kill switches are not routed on the public li
 
 **Sampling is ours.** The trace id from an inbound `traceparent` is always continued, so logs line up with the caller. The sampled bit is honoured only with `TRACE_TRUST_PARENT=true`; otherwise any client could force every request to be recorded.
 
+**An audit log that shows when it was edited.** An audit table anyone with database access can quietly rewrite is evidence of nothing. Each `access_log` row carries `seq`, the previous row's hash and its own HMAC-SHA256 over a canonical JSON encoding of the row, so changing, inserting or removing a row breaks the chain from that row on, and `python -m livesvc.audit verify DATABASE_PATH` names the first bad `seq` (exit 1). SQLite triggers refuse `UPDATE` and `DELETE` on the table; that stops bugs and casual edits, and the chain catches anyone who drops the triggers first. Appends run under `BEGIN IMMEDIATE` and `prev_hash` is unique, so two workers on one file cannot fork the chain.
+
+Two things a chain alone cannot do. It cannot detect rows cut off the end, because a shorter chain is still valid: record `GET /admin/audit/head` (or `python -m livesvc.audit head`) on a schedule somewhere the database owner cannot write, and pass it back with `verify --expect SEQ:HASH`. And it cannot stop someone holding the key; keep `AUDIT_CHAIN_KEY` in the secret store, not next to the database. Retention uses `Store.prune_audit(before_ts)`, which deletes the oldest prefix and records the last deleted row as the new anchor, so the rest still verifies. Rows written before the chain existed are kept and counted as unchained.
+
 **Environment stamp.** The first process to open a database writes its `APP_ENV` into a `meta` table. Anything else refuses to open it. A dev box with a prod connection string fails on boot instead of quietly working.
 
 **Canary vs a fresh baseline.** Counters are cumulative, so the comparison is between a canary and a baseline started at the same time from the current release, scraped after the same soak. Too little traffic returns `hold`, never `promote`.
@@ -95,6 +101,7 @@ More in [docs/rollout.md](docs/rollout.md).
 - The OTel mirror creates spans under OTel's own context and does not inject the incoming `traceparent` into it. If you use OTel properly, use its propagator and drop the built-in tracer.
 - Metrics are per process. Prometheus aggregates across replicas; the canary script expects one scrape per side.
 - `auth.py` is a stub with the right shape, not an identity provider: HMAC-signed tokens with a role and an expiry, no revocation, no key rotation. Replace `authenticate()` with your OIDC or gateway verification and keep the role-to-purpose mapping. `X-User-Id` on `/api/recommendations` is only a flag bucketing id for anonymous callers and grants nothing.
+- The audit chain is per database. With Postgres the same design works with a sequence, a unique `prev_hash` and `SERIALIZABLE` or an advisory lock around the append; the triggers become `REVOKE UPDATE, DELETE` for the application role. Verification is a full scan, fine up to millions of rows; past that, verify from the last checkpoint.
 - Consent rules are an example of the mechanism. Which purposes need consent where you operate is a legal question.
 
 ## The agent skill

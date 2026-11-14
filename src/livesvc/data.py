@@ -18,6 +18,9 @@ It also stamps each database with the environment that created it and
 refuses to open a database from another environment. Pointing a dev box at a
 prod copy is the most common way real personal data ends up somewhere it
 should not be, and a config typo should fail loudly rather than work.
+
+The access log is append-only and hash-chained (``audit.py``), so a row
+edited or deleted after the fact shows up in ``verify_audit``.
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+
+from livesvc.audit import AuditChain, Head, Verification
 
 # purpose -> fields it may read. "service" is running the product for the
 # user; it does not need opt-in. Anything else does.
@@ -63,7 +68,10 @@ CREATE TABLE IF NOT EXISTS access_log (
   purpose TEXT NOT NULL,
   fields TEXT NOT NULL,
   decision TEXT NOT NULL,
-  request_id TEXT
+  request_id TEXT,
+  seq INTEGER,
+  prev_hash TEXT,
+  row_hash TEXT
 );
 """
 
@@ -89,7 +97,7 @@ def mask_email(value: str) -> str:
 
 
 class Store:
-    def __init__(self, path: str, env: str) -> None:
+    def __init__(self, path: str, env: str, audit_key: bytes | None = None) -> None:
         self.env = env
         self._lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -101,6 +109,11 @@ class Store:
         elif row[0] != env:
             self.db.close()
             raise EnvironmentMismatch(f"database belongs to {row[0]!r}, this process is {env!r}")
+        try:
+            self.audit = AuditChain(self.db, audit_key)
+        except Exception:
+            self.db.close()
+            raise
 
     def ping(self) -> None:
         with self._lock:
@@ -148,11 +161,7 @@ class Store:
         decision: str,
         request_id: str | None,
     ) -> None:
-        self.db.execute(
-            "INSERT INTO access_log (ts, actor, user_id, purpose, fields, decision, request_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (time.time(), actor, user_id, purpose, ",".join(sorted(fields)), decision, request_id),
-        )
+        self.audit.append(time.time(), actor, user_id, purpose, fields, decision, request_id)
 
     def record_denied(
         self, actor: str, user_id: str, purpose: str, decision: str, request_id: str | None
@@ -217,6 +226,18 @@ class Store:
                 (user_id,),
             ).fetchall()
             return [tuple(r) for r in rows]
+
+    def audit_head(self) -> Head:
+        with self._lock:
+            return self.audit.head()
+
+    def verify_audit(self, expected: Head | None = None) -> Verification:
+        with self._lock:
+            return self.audit.verify(expected)
+
+    def prune_audit(self, before_ts: float) -> int:
+        with self._lock:
+            return self.audit.prune(before_ts)
 
     def close(self) -> None:
         with self._lock:

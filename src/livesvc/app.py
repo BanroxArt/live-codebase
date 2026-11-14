@@ -146,6 +146,7 @@ class App:
         self.route("GET", "/admin/flags", self.admin_flags, admin=True)
         self.route("POST", "/admin/flags/{name}/kill", self.admin_kill, admin=True)
         self.route("POST", "/admin/flags/{name}/revive", self.admin_revive, admin=True)
+        self.route("GET", "/admin/audit/head", self.admin_audit_head, admin=True)
 
     def _flags_loaded(self) -> None:
         if not self.flags.loaded:
@@ -354,8 +355,18 @@ class App:
         self.flags.revive(req.params["name"])
         return Response(202, {"killed": sorted(self.flags.killed())})
 
+    def admin_audit_head(self, req: Request) -> Response:
+        """Newest (seq, hash) of the access log, for a checkpoint kept outside the database."""
+        if not self._authorized(req):
+            return Response(401, {"error": "unauthorized"})
+        head = self.store.audit_head()
+        return Response(200, {"seq": head.seq, "hash": head.hash, "keyed": self.store.audit.keyed})
+
 
 def create_app(settings: Settings) -> App:
-    store = Store(settings.database_path, settings.env)
+    key = settings.audit_chain_key
+    if settings.is_prod and key is None:
+        log.warning("AUDIT_CHAIN_KEY is not set; the access log chain is unkeyed SHA-256")
+    store = Store(settings.database_path, settings.env, key.encode("utf-8") if key else None)
     flags = Flags(settings.env, kill_switches=settings.kill_switches, path=settings.flags_path)
     return App(settings, store, flags)

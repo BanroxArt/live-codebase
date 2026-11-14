@@ -33,6 +33,7 @@ class Settings:
     kill_switches: frozenset[str] = field(default_factory=frozenset)
     admin_token: str | None = field(default=None, repr=False)
     auth_signing_key: str | None = field(default=None, repr=False)
+    audit_chain_key: str | None = field(default=None, repr=False)
     drain_seconds: float = 10.0
     trace_sample_rate: float = 1.0
     # Honour the caller's "sampled" bit. Off by default: on a public edge it
@@ -96,6 +97,9 @@ def load(env: Mapping[str, str] | None = None) -> Settings:
         # Fail closed: prod without caller authentication would serve
         # profile data to anyone who can reach the port.
         raise ConfigError("AUTH_SIGNING_KEY is required in prod")
+    audit_key = env.get("AUDIT_CHAIN_KEY") or None
+    if audit_key is not None and len(audit_key) < 32:
+        raise ConfigError("AUDIT_CHAIN_KEY must be at least 32 characters")
     port = _int(env, "PORT", 8080, 1, 65535)
     admin_port = _int(env, "ADMIN_PORT", 9090, 1, 65535)
     if admin_port == port:
@@ -115,6 +119,7 @@ def load(env: Mapping[str, str] | None = None) -> Settings:
         kill_switches=kills,
         admin_token=token,
         auth_signing_key=signing_key,
+        audit_chain_key=audit_key,
         drain_seconds=_float(env, "DRAIN_SECONDS", 10.0, 0, 300),
         trace_sample_rate=_float(env, "TRACE_SAMPLE_RATE", 1.0, 0, 1),
         trace_trust_parent=_bool(env, "TRACE_TRUST_PARENT", False),
