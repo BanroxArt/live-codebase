@@ -1,6 +1,6 @@
 PY ?= python3
 
-.PHONY: install lint test check run docker
+.PHONY: bench install lint test check run docker
 
 install:
 	$(PY) -m pip install -e '.[dev]'
@@ -21,3 +21,6 @@ run:
 
 docker:
 	docker build -t livesvc:dev .
+
+bench:
+	PYTHONPATH=src $(PY) bench/run.py

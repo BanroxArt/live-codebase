@@ -108,6 +108,10 @@ More in [docs/rollout.md](docs/rollout.md).
 
 Copy `SKILL.md` to `.cursor/skills/live-codebase/SKILL.md` or your agent's equivalent. It reads the team's repo first, then plans the two weeks using this service as the reference for what "done" looks like. [examples/two-week-plan.md](examples/two-week-plan.md) shows the output for a made-up team.
 
+## Benchmarks
+
+Per-operation timings and how to reproduce them: [docs/benchmarks.md](docs/benchmarks.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE). Copyright 2026 Banrox Inc.
