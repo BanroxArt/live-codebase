@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import io
+import os
 import re
 import subprocess
 import sys
@@ -22,8 +23,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SELF = Path(__file__).resolve()
 
-# Split so this file does not match itself.
-INTERNAL_NEEDLES = ("prime" + "ak", "banrox-" + "review")
+# Extra words that must never appear in a published file (for example private
+# project names). The list comes from the environment so it is never itself
+# published: CHECK_DENY_WORDS="word1,word2". Empty by default, e.g. in CI.
+INTERNAL_NEEDLES = tuple(
+    w.strip().lower() for w in os.environ.get("CHECK_DENY_WORDS", "").split(",") if w.strip()
+)
 
 SECRET_PATTERNS = {
     "aws_access_key_id": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
