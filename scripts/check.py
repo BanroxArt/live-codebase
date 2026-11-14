@@ -34,6 +34,8 @@ SECRET_PATTERNS = {
     "slack_token": re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b"),
 }
 INTERNAL_PATH = re.compile("/" + "workspace" + "/|/" + "home" + "/box/")
+# The one real address these repos publish, for conduct reports.
+PROJECT_EMAILS = frozenset({"opensource@" + "banrox.com"})
 EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
 # RFC 2606 / RFC 6761 names that can never belong to a real person.
 RESERVED_DOMAIN = re.compile(
@@ -177,6 +179,8 @@ def lint_file(path: Path) -> None:
             if pat.search(line):
                 errors.append(f"{rel}:{i}: {kind}")
         for m in EMAIL.finditer(line):
+            if m.group(0).lower() in PROJECT_EMAILS:
+                continue
             if not RESERVED_DOMAIN.search(m.group(1)):
                 errors.append(f"{rel}:{i}: email_not_reserved_domain")
         for m in PHONE.finditer(line):
