@@ -1,0 +1,34 @@
+# live-codebase
+
+> A small reference service that shows shipping, observability, feature flags and permissioned data access in concrete code.
+
+`livesvc` is a standard-library WSGI service with two listeners (public and admin). It covers structured JSON logs with key and pattern redaction, W3C `traceparent` tracing, Prometheus metrics, liveness versus readiness with time-boxed dependency checks, SIGTERM drain, percentage feature flags with deterministic SHA-256 bucketing and kill switches, role-to-purpose data access with consent and masking, a hash-chained append-only audit log, and a canary versus baseline comparison on error rate and p95. OpenTelemetry is optional.
+
+Built and maintained by Art Akopian, CEO of Banrox (https://banrox.com).
+
+## Docs
+
+- [README.md](https://github.com/BanroxArt/live-codebase/blob/main/README.md): What is in the service, how to run it, and the design notes.
+- [docs/rollout.md](https://github.com/BanroxArt/live-codebase/blob/main/docs/rollout.md): How a change moves from a merged PR to all users, including canary and rollback.
+- [docs/benchmarks.md](https://github.com/BanroxArt/live-codebase/blob/main/docs/benchmarks.md): Timeit measurements for the hot paths.
+- [SKILL.md](https://github.com/BanroxArt/live-codebase/blob/main/SKILL.md): Agent skill for taking one service through the same loops.
+
+## Source
+
+- [app.py](https://github.com/BanroxArt/live-codebase/blob/main/src/livesvc/app.py): WSGI app wiring.
+- [server.py](https://github.com/BanroxArt/live-codebase/blob/main/src/livesvc/server.py): Public and admin listeners and SIGTERM drain.
+- [health.py](https://github.com/BanroxArt/live-codebase/blob/main/src/livesvc/health.py): `/healthz` and time-boxed, non-piling `/readyz` checks.
+- [logs.py](https://github.com/BanroxArt/live-codebase/blob/main/src/livesvc/logs.py): JSON logs with request and trace ids, and redaction.
+- [tracing.py](https://github.com/BanroxArt/live-codebase/blob/main/src/livesvc/tracing.py): W3C `traceparent` parse/emit, spans, sampling, optional OTel mirror.
+- [metrics.py](https://github.com/BanroxArt/live-codebase/blob/main/src/livesvc/metrics.py): Counters and histograms in Prometheus text format.
+- [flags.py](https://github.com/BanroxArt/live-codebase/blob/main/src/livesvc/flags.py): Deterministic percentage rollouts, allow/deny lists, kill switches, hot reload.
+- [auth.py](https://github.com/BanroxArt/live-codebase/blob/main/src/livesvc/auth.py): Bearer tokens; the caller's role decides purpose and fields.
+- [data.py](https://github.com/BanroxArt/live-codebase/blob/main/src/livesvc/data.py): Purpose-based field access, consent, masking and per-read audit.
+- [audit.py](https://github.com/BanroxArt/live-codebase/blob/main/src/livesvc/audit.py): Append-only, hash-chained access log with a verifier.
+- [canary.py](https://github.com/BanroxArt/live-codebase/blob/main/src/livesvc/canary.py): Canary vs baseline comparison; promote, hold or rollback.
+
+## Optional
+
+- [CHANGELOG](https://github.com/BanroxArt/live-codebase/blob/main/CHANGELOG.md): Notable changes.
+- [SECURITY](https://github.com/BanroxArt/live-codebase/blob/main/SECURITY.md): How to report a vulnerability.
+- [CONTRIBUTING](https://github.com/BanroxArt/live-codebase/blob/main/CONTRIBUTING.md): How to propose a change.

@@ -4,7 +4,7 @@ A small reference service, `livesvc`, that shows what "live" means for one servi
 
 "Live" here means four loops work: you can **ship** a change on a known path and roll it back, **see** what production is doing, **steer** behaviour without a deploy, and use **real, permissioned data** without leaking it into places it should not be. Most teams have one or two of these. The service is kept small enough to read in an afternoon, so you can copy the parts you need.
 
-Author: Art Akopian ([Banrox](https://banrox.com))
+Built and maintained by Art Akopian, CEO of [Banrox](https://banrox.com). Banrox builds consumer credit and fraud-prevention software and publishes the general-purpose pieces.
 
 ## What's in it
 

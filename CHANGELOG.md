@@ -24,6 +24,8 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ### Added
 
+- Visible author attribution, a `CITATION.cff` citation file, and `llms.txt`.
+
 - Tamper-evident access log (`audit.py`). Rows are hash-chained (HMAC-SHA256 with `AUDIT_CHAIN_KEY`, plain SHA-256 without), `UPDATE` and `DELETE` are refused by triggers, `python -m livesvc.audit verify|head` checks the chain read-only, `/admin/audit/head` serves the head for outside checkpoints, and `Store.prune_audit` removes old rows behind a recorded anchor. Existing databases are migrated in place; their older rows are reported as unchained.
 - `auth.py` with role policies, `python -m livesvc.auth SUBJECT ROLE` for dev tokens.
 - `ADMIN_HOST`, `ADMIN_PORT`, `AUTH_SIGNING_KEY`, `TRACE_TRUST_PARENT` settings; `listener` label on request metrics.
